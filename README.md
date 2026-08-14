@@ -100,12 +100,12 @@ If you fork or contribute, never commit your own `.env` or `auth.json`. The
 
 ---
 
-MIT. do whatever you want with these.
+MIT. Do whatever you want with these.
 
-built by @BChopLXXXII
+Built by @BChopLXXXII
 
-built for BUILDERS who just want their AI to feel less... corporate.
+Built for BUILDERS who just want their AI to feel less... corporate.
 
-ship it. 🚀
+Ship it. 🚀
 
-if this helped, ⭐ the repo — it helps others find it.
+If this helped, ⭐ the repo — it helps others find it.
