@@ -235,6 +235,32 @@ def discover() -> list[dict]:
 
 # ---------------------------------------------------------------- probing
 
+def get_usage(p: dict) -> str | None:
+    """Return a short usage string for providers that expose quota, else None.
+
+    Only OpenRouter publishes a per-key credit balance over the plain API, so
+    it's the only one that yields a number. Everything else returns None and
+    the board shows "usage: not shared" rather than guessing.
+    """
+    prov, base, key = p["provider"], p["base_url"], p.get("key")
+    if not key:
+        return None
+    try:
+        if prov == "openrouter":
+            status, data, err = _http_json(f"{base}/credits", _headers(prov, key), None, TIMEOUT_LIST)
+            if status == 200 and isinstance(data, dict):
+                d = data.get("data", {})
+                total, used = d.get("total_credits"), d.get("total_usage")
+                if isinstance(total, (int, float)) and isinstance(used, (int, float)):
+                    left = total - used
+                    pct = (used / total * 100) if total else 0
+                    return f"${left:.2f} left of ${total:.0f} ({pct:.0f}% used)"
+        # add more providers here as they expose quota endpoints
+    except Exception:
+        return None
+    return None
+
+
 def list_models(p: dict) -> tuple[list[str], str]:
     """Return (model_ids, note). Falls back to a default model if listing fails."""
     prov, base, key = p["provider"], p["base_url"], p.get("key")
@@ -340,7 +366,9 @@ def main():
         sys.exit(1)
 
     results = []
+    usages = {}
     for p in providers:
+        usages[p["provider"]] = get_usage(p)
         models, note = list_models(p)
         if args.model:
             models = [args.model]
@@ -375,7 +403,9 @@ def main():
     total_alive = total = 0
     for prov in byprov:
         rows = sorted(byprov[prov], key=lambda r: (order.get(r["state"], 9), r["model"] or ""))
-        print(f"\n{prov}")
+        usage = usages.get(prov)
+        usage_str = f"  {D}usage: {usage}{X}" if usage else ""
+        print(f"\n{prov}{usage_str}")
         for r in rows:
             total += 1
             if r["state"] == "alive":

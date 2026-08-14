@@ -50,6 +50,13 @@ copilot
   ● claude-opus-5  HTTP 400  <- red: you can't use this one
 ```
 
+Providers that share their quota show it on the header line, so you see a
+near-empty balance before you start, not a dead model mid-session:
+
+```
+openrouter  usage: $0.41 left of $65 (99% used)
+```
+
 - **green** — the model replied. Good to go.
 - **red** — the provider refused (no access, or model not found).
 - **yellow** — out of usage / rate-limited, or the provider errored.
@@ -80,6 +87,10 @@ If you fork or contribute, never commit your own `.env` or `auth.json`. The
   you pass `--limit 0` for all of them.
 - GitHub Copilot needs a token. Pulse tries `~/.hermes/.env`, then `gh auth
   token` from the GitHub CLI.
+- Only OpenRouter exposes a credit balance over the plain API, so it's the one
+  with a number on the usage line. Other providers don't share quota this way,
+  so pulse shows nothing rather than guess. As more providers open up a quota
+  endpoint, they slot into `get_usage()`.
 
 ## Later
 
