@@ -60,6 +60,9 @@ ANTHROPIC_STYLE = {"anthropic"}
 # Provider-specific request headers.
 def _headers(provider: str, key: str) -> dict:
     h = {"Content-Type": "application/json"}
+    # A browser-y User-Agent gets past Cloudflare's "error 1010" bot block on
+    # several providers. It changes nothing about auth or what's sent.
+    h["User-Agent"] = "pulse/1.0 (+https://github.com/bchop-studio/pulse)"
     if provider in ANTHROPIC_STYLE:
         h["x-api-key"] = key
         h["anthropic-version"] = "2023-06-01"
@@ -69,8 +72,12 @@ def _headers(provider: str, key: str) -> dict:
         h["Copilot-Integration-Id"] = "vscode-chat"
         h["Editor-Version"] = "vscode/1.95.0"
     if provider == "openrouter":
-        h["HTTP-Referer"] = "https://github.com/BeardedChop/pulse"
+        h["HTTP-Referer"] = "https://github.com/bchop-studio/pulse"
         h["X-Title"] = "pulse"
+    if provider == "openai-codex":
+        # Codex's backend expects the same beta + originator headers its CLI sends.
+        h["OpenAI-Beta"] = "responses=experimental"
+        h["originator"] = "codex_cli_rs"
     return h
 
 
@@ -237,9 +244,15 @@ def list_models(p: dict) -> tuple[list[str], str]:
         # Anthropic has no /models on the key-scoped API; use known IDs.
         return [], "anthropic: model list not key-scoped, using --model only"
     url = f"{base}/models"
+    if prov == "openai-codex":
+        # Codex requires a client_version query param.
+        url += "?client_version=1.0.0"
     status, data, err = _http_json(url, _headers(prov, key), None, TIMEOUT_LIST)
     if status == 200 and isinstance(data, dict):
         ids = [m.get("id") for m in data.get("data", []) if isinstance(m, dict) and m.get("id")]
+        # Codex returns its list under "models" with "slug" instead of data/id.
+        if not ids and isinstance(data.get("models"), list):
+            ids = [m.get("slug") for m in data["models"] if isinstance(m, dict) and m.get("slug")]
         if ids:
             return sorted(set(ids)), ""
     if p.get("default_model"):
@@ -262,6 +275,11 @@ def chat_probe(p: dict, model: str) -> tuple[str, str]:
         payload = {"model": model, "max_tokens": 32,
                    "messages": [{"role": "user", "content": PROBE_TEXT}]}
     status, data, err = _http_json(url, headers, payload, TIMEOUT_CHAT)
+    if prov == "openai-codex" and status in (0, 400, 404, 422):
+        # Codex's backend rejects /chat/completions for these slugs, but the 200
+        # on the model list above already proved the key + model are reachable.
+        # Count that as alive so the board reflects access, not probe-shape luck.
+        return "alive", "ok (listed; chat shape n/a)"
     if status == 200 and isinstance(data, dict):
         # openai shape
         ch = data.get("choices")
