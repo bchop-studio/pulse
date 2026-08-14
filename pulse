@@ -1,0 +1,374 @@
+#!/usr/bin/env python3
+"""pulse — one tap, see which of your models are alive.
+
+Reads your Hermes setup (~/.hermes/auth.json credential pool, custom
+providers from config.yaml, and well-known API-key env vars), asks each
+provider for its real model list, then sends a tiny "say ok" request to
+every model. Prints green (alive), red (refused / out of usage), or
+yellow (can't tell).
+
+Secrets never print. Keys are read from disk, used in memory, and shown
+only as a fingerprint like "key …a1b2 present".
+"""
+from __future__ import annotations
+
+import argparse
+import concurrent.futures as cf
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+HERMES_HOME = Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes"))
+AUTH_JSON = HERMES_HOME / "auth.json"
+CONFIG_YAML = HERMES_HOME / "config.yaml"
+ENV_FILE = HERMES_HOME / ".env"
+
+
+def _load_dotenv() -> dict:
+    """Parse ~/.hermes/.env without printing values. Values stay in-process."""
+    out = {}
+    try:
+        for ln in ENV_FILE.read_text().splitlines():
+            ln = ln.strip()
+            if not ln or ln.startswith("#") or "=" not in ln:
+                continue
+            k, _, v = ln.partition("=")
+            v = v.strip().strip('"').strip("'")
+            if k.strip():
+                out[k.strip()] = v
+    except Exception:
+        pass
+    return out
+
+
+_DOTENV = _load_dotenv()
+
+
+def envget(var: str) -> str:
+    return os.environ.get(var) or _DOTENV.get(var, "")
+
+PROBE_TEXT = "Reply with exactly: ok"
+TIMEOUT_LIST = 15
+TIMEOUT_CHAT = 30
+
+# Providers that speak Anthropic's Messages API instead of OpenAI chat.
+ANTHROPIC_STYLE = {"anthropic"}
+
+# Provider-specific request headers.
+def _headers(provider: str, key: str) -> dict:
+    h = {"Content-Type": "application/json"}
+    if provider in ANTHROPIC_STYLE:
+        h["x-api-key"] = key
+        h["anthropic-version"] = "2023-06-01"
+    else:
+        h["Authorization"] = f"Bearer {key}"
+    if provider == "copilot":
+        h["Copilot-Integration-Id"] = "vscode-chat"
+        h["Editor-Version"] = "vscode/1.95.0"
+    if provider == "openrouter":
+        h["HTTP-Referer"] = "https://github.com/BeardedChop/pulse"
+        h["X-Title"] = "pulse"
+    return h
+
+
+def _http_json(url: str, headers: dict, payload: dict | None, timeout: int):
+    """Return (status, data_dict_or_None, error_str)."""
+    body = None if payload is None else json.dumps(payload).encode()
+    req = urllib.request.Request(url, data=body, headers=headers, method="POST" if payload else "GET")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.status, json.loads(r.read().decode() or "{}"), ""
+    except urllib.error.HTTPError as e:
+        try:
+            data = json.loads(e.read().decode() or "{}")
+        except Exception:
+            data = None
+        return e.code, data, f"HTTP {e.code}"
+    except Exception as e:
+        return 0, None, str(e)
+
+
+def _fp(key: str) -> str:
+    return f"…{key[-4:]}" if key and len(key) >= 4 else "(set)"
+
+
+# ---------------------------------------------------------------- discovery
+
+def load_pool() -> dict:
+    try:
+        d = json.loads(AUTH_JSON.read_text())
+        return d.get("credential_pool", {}) or {}
+    except Exception:
+        return {}
+
+
+def load_custom_providers() -> dict:
+    """Parse providers: block from config.yaml (simple, no yaml dep)."""
+    out = {}
+    try:
+        lines = CONFIG_YAML.read_text().splitlines()
+    except Exception:
+        return out
+    in_block = False
+    cur = None
+    for ln in lines:
+        if ln.startswith("providers:"):
+            in_block = True
+            continue
+        if in_block:
+            if ln and not ln.startswith(" ") and not ln.startswith("#"):
+                break
+            stripped = ln.strip()
+            if ln.startswith("  ") and not ln.startswith("    ") and stripped.endswith(":"):
+                cur = stripped[:-1]
+                out[cur] = {}
+            elif cur and ":" in stripped:
+                k, _, v = stripped.partition(":")
+                out[cur][k.strip()] = v.strip().strip('"').strip("'")
+    return out
+
+
+# env-var fallbacks for providers not present in the auth pool
+ENV_PROVIDERS = {
+    "anthropic":  ("https://api.anthropic.com", ["ANTHROPIC_API_KEY", "ANTHROPIC_TOKEN"]),
+    "copilot":    ("https://api.githubcopilot.com", ["COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"]),
+    "openrouter": ("https://openrouter.ai/api/v1", ["OPENROUTER_API_KEY"]),
+    "kimi":       ("https://api.moonshot.ai/v1", ["KIMI_API_KEY"]),
+    "kimi-coding":("https://api.moonshot.ai/v1", ["KIMI_API_KEY", "KIMI_CODING_API_KEY"]),
+    "zai":        ("https://api.z.ai/api/paas/v4", ["GLM_API_KEY", "ZAI_API_KEY"]),
+    "xai":        ("https://api.x.ai/v1", ["XAI_API_KEY"]),
+    "opencode-go":("https://opencode.ai/zen/go/v1", ["OPENCODE_GO_API_KEY"]),
+    "glm":        ("https://api.z.ai/api/paas/v4", ["GLM_API_KEY"]),
+}
+
+# Hard cap on models probed per provider unless --limit overrides. OpenRouter
+# alone lists hundreds; probing all of them is slow and pointless for a pulse.
+DEFAULT_MODEL_CAP = 12
+
+
+def _gh_token() -> str:
+    """Copilot token via `gh auth token` as a last resort (device-code tokens)."""
+    try:
+        import subprocess
+        r = subprocess.run(["gh", "auth", "token"], capture_output=True, text=True, timeout=10)
+        return r.stdout.strip() if r.returncode == 0 else ""
+    except Exception:
+        return ""
+
+
+def discover() -> list[dict]:
+    """Return list of {provider, base_url, key, source}."""
+    found = []
+    seen = set()
+
+    pool = load_pool()
+    for slug, entries in pool.items():
+        if not entries:
+            continue
+        e = entries[0]
+        base = e.get("base_url") or e.get("inference_base_url") or ""
+        # OAuth access_token entries; api_key entries store secret separately
+        key = e.get("access_token") or ""
+        auth_type = e.get("auth_type", "")
+        if auth_type == "oauth" and not key:
+            key = e.get("access_token", "")
+        if base and key:
+            found.append({"provider": slug, "base_url": base.rstrip("/"),
+                          "key": key, "source": "auth-pool"})
+            seen.add(slug)
+        elif base and not key:
+            # key lives in OS keyring; try env fallback below
+            found.append({"provider": slug, "base_url": base.rstrip("/"),
+                          "key": None, "source": "auth-pool", "needs_env": True})
+            seen.add(slug)
+
+    for slug, (base, envs) in ENV_PROVIDERS.items():
+        if slug in seen:
+            continue
+        for var in envs:
+            k = envget(var)
+            if k:
+                found.append({"provider": slug, "base_url": base,
+                              "key": k, "source": f"env:{var}"})
+                seen.add(slug)
+                break
+
+    for slug, cfg in load_custom_providers().items():
+        if slug in seen:
+            continue
+        base = cfg.get("api") or cfg.get("base_url") or ""
+        env = cfg.get("key_env") or ""
+        k = envget(env)
+        if base:
+            found.append({"provider": slug, "base_url": base.rstrip("/"),
+                          "key": k or None, "source": f"config ({env})",
+                          "default_model": cfg.get("default_model", "")})
+            seen.add(slug)
+
+    # fill in needs_env entries from env fallbacks (and gh CLI for copilot)
+    for f in found:
+        if f.get("needs_env"):
+            slug = f["provider"]
+            for var in ENV_PROVIDERS.get(slug, ("", []))[1]:
+                k = envget(var)
+                if k:
+                    f["key"] = k
+                    f["source"] += f"+env:{var}"
+                    break
+            if not f.get("key") and slug == "copilot":
+                k = _gh_token()
+                if k:
+                    f["key"] = k
+                    f["source"] += "+gh-cli"
+    return found
+
+
+# ---------------------------------------------------------------- probing
+
+def list_models(p: dict) -> tuple[list[str], str]:
+    """Return (model_ids, note). Falls back to a default model if listing fails."""
+    prov, base, key = p["provider"], p["base_url"], p.get("key")
+    if not key:
+        return [], "no key available (keyring-only, set env var)"
+    if prov in ANTHROPIC_STYLE:
+        # Anthropic has no /models on the key-scoped API; use known IDs.
+        return [], "anthropic: model list not key-scoped, using --model only"
+    url = f"{base}/models"
+    status, data, err = _http_json(url, _headers(prov, key), None, TIMEOUT_LIST)
+    if status == 200 and isinstance(data, dict):
+        ids = [m.get("id") for m in data.get("data", []) if isinstance(m, dict) and m.get("id")]
+        if ids:
+            return sorted(set(ids)), ""
+    if p.get("default_model"):
+        return [p["default_model"]], f"list failed ({err}), using default"
+    return [], f"list failed ({err or 'no models'})"
+
+
+def chat_probe(p: dict, model: str) -> tuple[str, str]:
+    """Return (state, detail) where state is alive|refused|limited|error."""
+    prov, base, key = p["provider"], p["base_url"], p.get("key")
+    if not key:
+        return "error", "no key"
+    headers = _headers(prov, key)
+    if prov in ANTHROPIC_STYLE:
+        url = f"{base}/messages"
+        payload = {"model": model, "max_tokens": 32,
+                   "messages": [{"role": "user", "content": PROBE_TEXT}]}
+    else:
+        url = f"{base}/chat/completions"
+        payload = {"model": model, "max_tokens": 32,
+                   "messages": [{"role": "user", "content": PROBE_TEXT}]}
+    status, data, err = _http_json(url, headers, payload, TIMEOUT_CHAT)
+    if status == 200 and isinstance(data, dict):
+    # openai shape
+        ch = data.get("choices")
+        if ch:
+            msg = ch[0].get("message", {})
+            content = msg.get("content")
+            # some models return a list of content parts, some a string
+            if isinstance(content, list):
+                content = "".join(p.get("text", "") for p in content if isinstance(p, dict))
+            if not content:
+                content = msg.get("reasoning_content") or ""
+            if (content or "").strip():
+                return "alive", "ok"
+            # reasoning models can burn all tokens on thinking (finish=length) —
+            # still proves the model responded, so count it alive.
+            if ch[0].get("finish_reason") == "length" and msg:
+                return "alive", "ok (reasoning, no text)"
+        # anthropic shape
+        if data.get("content"):
+            try:
+                if any(b.get("text") for b in data["content"] if isinstance(b, dict)):
+                    return "alive", "ok"
+            except Exception:
+                pass
+        return "error", "200 but empty reply"
+    if status in (401, 403):
+        return "refused", f"HTTP {status} (no access to this model)"
+    if status == 404:
+        return "refused", "HTTP 404 (model not found)"
+    if status == 429:
+        return "limited", "HTTP 429 (out of usage / rate limited)"
+    if status and 500 <= status < 600:
+        return "error", f"HTTP {status} (provider error)"
+    return "error", err or f"HTTP {status}"
+
+
+# ---------------------------------------------------------------- rendering
+
+G, R, Y, D, X = "\033[32m", "\033[31m", "\033[33m", "\033[2m", "\033[0m"
+ICON = {"alive": f"{G}●{X}", "refused": f"{R}●{X}", "limited": f"{Y}●{X}", "error": f"{Y}●{X}"}
+
+
+def main():
+    ap = argparse.ArgumentParser(prog="pulse", description="One tap — see which models are alive.")
+    ap.add_argument("--provider", help="only check one provider slug")
+    ap.add_argument("--model", help="only check one model id (use with --provider)")
+    ap.add_argument("--limit", type=int, default=DEFAULT_MODEL_CAP,
+                    help="max models per provider (0 = all)")
+    ap.add_argument("--json", action="store_true", help="machine-readable output")
+    ap.add_argument("--list-only", action="store_true", help="list models, don't probe")
+    args = ap.parse_args()
+
+    providers = discover()
+    if args.provider:
+        providers = [p for p in providers if p["provider"] == args.provider]
+    if not providers:
+        print("No providers found. Is Hermes set up? (~/.hermes/auth.json)")
+        sys.exit(1)
+
+    results = []
+    for p in providers:
+        models, note = list_models(p)
+        if args.model:
+            models = [args.model]
+        if args.limit:
+            models = models[: args.limit]
+        if not models:
+            results.append({"provider": p["provider"], "model": None,
+                            "state": "error", "detail": note or "no models"})
+            continue
+        if args.list_only:
+            for m in models:
+                results.append({"provider": p["provider"], "model": m,
+                                "state": "listed", "detail": note})
+            continue
+        with cf.ThreadPoolExecutor(max_workers=4) as ex:
+            futs = {ex.submit(chat_probe, p, m): m for m in models}
+            for fut in cf.as_completed(futs):
+                m = futs[fut]
+                state, detail = fut.result()
+                results.append({"provider": p["provider"], "model": m,
+                                "state": state, "detail": detail})
+
+    if args.json:
+        print(json.dumps(results, indent=2))
+        return
+
+    # group by provider, alive first
+    byprov = {}
+    for r in results:
+        byprov.setdefault(r["provider"], []).append(r)
+    order = {"alive": 0, "limited": 1, "refused": 2, "error": 3, "listed": 4}
+    total_alive = total = 0
+    for prov in byprov:
+        rows = sorted(byprov[prov], key=lambda r: (order.get(r["state"], 9), r["model"] or ""))
+        print(f"\n{prov}")
+        for r in rows:
+            total += 1
+            if r["state"] == "alive":
+                total_alive += 1
+            icon = ICON.get(r["state"], f"{D}●{X}")
+            model = r["model"] or "(none)"
+            detail = f"  {D}{r['detail']}{X}" if r["detail"] and r["state"] != "alive" else ""
+            print(f"  {icon} {model}{detail}")
+    print(f"\n{total_alive}/{total} models alive")
+    sys.exit(0 if total_alive else 1)
+
+
+if __name__ == "__main__":
+    main()
