@@ -37,6 +37,8 @@ pulse --provider copilot   # just one provider
 pulse --limit 5            # cap models per provider (default 12)
 pulse --list-only          # list models without probing
 pulse --json               # machine-readable output
+pulse --watch              # live board, refresh liveness every 60s
+pulse --watch 20           # live board, refresh every 20s
 ```
 
 Exit code is `0` when at least one model is alive, `1` when none are — so
@@ -60,6 +62,10 @@ openrouter  usage: $0.41 left of $65 (99% used)
 - **green** — the model replied. Good to go.
 - **red** — the provider refused (no access, or model not found).
 - **yellow** — out of usage / rate-limited, or the provider errored.
+
+`--watch` redraws the same board on a loop. It re-probes model liveness on
+your beat (default 60s, minimum 15s) but only re-asks each provider for its
+model list and usage every 5 minutes, so it stays cheap to run.
 
 ## Security & privacy
 

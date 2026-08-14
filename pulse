@@ -348,28 +348,18 @@ G, R, Y, D, X = "\033[32m", "\033[31m", "\033[33m", "\033[2m", "\033[0m"
 ICON = {"alive": f"{G}●{X}", "refused": f"{R}●{X}", "limited": f"{Y}●{X}", "error": f"{Y}●{X}"}
 
 
-def main():
-    ap = argparse.ArgumentParser(prog="pulse", description="One tap — see which models are alive.")
-    ap.add_argument("--provider", help="only check one provider slug")
-    ap.add_argument("--model", help="only check one model id (use with --provider)")
-    ap.add_argument("--limit", type=int, default=DEFAULT_MODEL_CAP,
-                    help="max models per provider (0 = all)")
-    ap.add_argument("--json", action="store_true", help="machine-readable output")
-    ap.add_argument("--list-only", action="store_true", help="list models, don't probe")
-    args = ap.parse_args()
+def run_scan(providers, args, usages, refresh_lists=True):
+    """One pass over providers. Returns result rows.
 
-    providers = discover()
-    if args.provider:
-        providers = [p for p in providers if p["provider"] == args.provider]
-    if not providers:
-        print("No providers found. Is Hermes set up? (~/.hermes/auth.json)")
-        sys.exit(1)
-
+    usages is a dict mutated in place. refresh_lists=False reuses the previous
+    model lists (watch mode) so we only re-probe liveness, not re-list.
+    """
     results = []
-    usages = {}
     for p in providers:
-        usages[p["provider"]] = get_usage(p)
-        models, note = list_models(p)
+        if refresh_lists or p["provider"] not in usages:
+            usages[p["provider"]] = get_usage(p)
+        models, note = list_models(p) if (refresh_lists or "_models" not in p) else (p["_models"], p.get("_note", ""))
+        p["_models"], p["_note"] = models, note
         if args.model:
             models = [args.model]
         if args.limit:
@@ -390,22 +380,21 @@ def main():
                 state, detail = fut.result()
                 results.append({"provider": p["provider"], "model": m,
                                 "state": state, "detail": detail})
+    return results
 
-    if args.json:
-        print(json.dumps(results, indent=2))
-        return
 
-    # group by provider, alive first
+def render(results, usages):
     byprov = {}
     for r in results:
         byprov.setdefault(r["provider"], []).append(r)
     order = {"alive": 0, "limited": 1, "refused": 2, "error": 3, "listed": 4}
     total_alive = total = 0
+    out = []
     for prov in byprov:
         rows = sorted(byprov[prov], key=lambda r: (order.get(r["state"], 9), r["model"] or ""))
         usage = usages.get(prov)
         usage_str = f"  {D}usage: {usage}{X}" if usage else ""
-        print(f"\n{prov}{usage_str}")
+        out.append(f"\n{prov}{usage_str}")
         for r in rows:
             total += 1
             if r["state"] == "alive":
@@ -413,8 +402,64 @@ def main():
             icon = ICON.get(r["state"], f"{D}●{X}")
             model = r["model"] or "(none)"
             detail = f"  {D}{r['detail']}{X}" if r["detail"] and r["state"] != "alive" else ""
-            print(f"  {icon} {model}{detail}")
-    print(f"\n{total_alive}/{total} models alive")
+            out.append(f"  {icon} {model}{detail}")
+    out.append(f"\n{total_alive}/{total} models alive")
+    return "\n".join(out), total_alive
+
+
+def main():
+    ap = argparse.ArgumentParser(prog="pulse", description="One tap — see which models are alive.")
+    ap.add_argument("--provider", help="only check one provider slug")
+    ap.add_argument("--model", help="only check one model id (use with --provider)")
+    ap.add_argument("--limit", type=int, default=DEFAULT_MODEL_CAP,
+                    help="max models per provider (0 = all)")
+    ap.add_argument("--json", action="store_true", help="machine-readable output")
+    ap.add_argument("--list-only", action="store_true", help="list models, don't probe")
+    ap.add_argument("--watch", type=int, nargs="?", const=60, metavar="SECONDS",
+                    help="re-check liveness on a loop (default 60s). Lists + usage "
+                         "refresh every 5 minutes. Ctrl+C to stop.")
+    args = ap.parse_args()
+
+    providers = discover()
+    if args.provider:
+        providers = [p for p in providers if p["provider"] == args.provider]
+    if not providers:
+        print("No providers found. Is Hermes set up? (~/.hermes/auth.json)")
+        sys.exit(1)
+
+    usages = {}
+
+    if args.watch is not None:
+        import time
+        LIVENESS = max(15, args.watch)   # never hotter than 15s
+        LIST_REFRESH = 300               # re-list models + usage every 5 min
+        last_full = 0.0
+        try:
+            while True:
+                now = time.time()
+                refresh = (now - last_full) >= LIST_REFRESH
+                if refresh:
+                    last_full = now
+                results = run_scan(providers, args, usages, refresh_lists=refresh)
+                board, alive = render(results, usages)
+                # clear screen, then draw the fresh board with a timestamp
+                print("\033[2J\033[H", end="", flush=True)
+                print(f"{D}pulse — live  (liveness every {LIVENESS}s, lists every 5m, Ctrl+C to stop)  "
+                      f"{time.strftime('%H:%M:%S')}{X}", flush=True)
+                print(board, flush=True)
+                time.sleep(LIVENESS)
+        except KeyboardInterrupt:
+            print("\nstopped.")
+            sys.exit(0)
+
+    results = run_scan(providers, args, usages, refresh_lists=True)
+
+    if args.json:
+        print(json.dumps(results, indent=2))
+        return
+
+    board, total_alive = render(results, usages)
+    print(board)
     sys.exit(0 if total_alive else 1)
 
 
