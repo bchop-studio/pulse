@@ -20,7 +20,7 @@ configured and every model it can find, then shows you green (alive), red
   a provider doesn't expose one).
 - Sends a tiny "reply with: ok" to each model and records who answered.
 - Prints one clean grouped list. Secrets are never printed — keys are read
-  from disk, held in memory, and shown only as a fingerprint.
+  from disk, held in memory, and never included in the output.
 
 ## Install
 
@@ -58,7 +58,7 @@ Providers that share their quota show it on the header line, so you see a
 near-empty balance before you start, not a dead model mid-session:
 
 ```
-openrouter  usage: $0.41 left of $65 (99% used)
+openrouter  usage: $8.40 left of $20 (58% used)
 ```
 
 - **green** — the model replied. Good to go.
