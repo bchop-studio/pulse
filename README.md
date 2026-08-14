@@ -1,8 +1,8 @@
 # pulse
 
-![Pulse cover](assets/cover.png)
+![Pulse cover](cover.png)
 
-One tap — see which of your models are actually alive.
+Run one command to see which of your models are actually alive.
 
 You have access to a pile of providers and models. Some are great, some run
 out of usage mid-session, and some models on a provider you can't touch at

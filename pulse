@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""pulse — one tap, see which of your models are alive.
+"""pulse — run one command to see which of your models are alive.
 
 Reads your Hermes setup (~/.hermes/auth.json credential pool, custom
 providers from config.yaml, and well-known API-key env vars), asks each
@@ -408,7 +408,10 @@ def render(results, usages):
 
 
 def main():
-    ap = argparse.ArgumentParser(prog="pulse", description="One tap — see which models are alive.")
+    ap = argparse.ArgumentParser(
+        prog="pulse",
+        description="Run one command to see which models are alive.",
+    )
     ap.add_argument("--provider", help="only check one provider slug")
     ap.add_argument("--model", help="only check one model id (use with --provider)")
     ap.add_argument("--limit", type=int, default=DEFAULT_MODEL_CAP,
