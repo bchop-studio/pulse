@@ -103,3 +103,7 @@ If you fork or contribute, never commit your own `.env` or `auth.json`. The
 The plan is a small UI on top of the same engine — a button that runs the
 check and shows the board. The CLI is the source of truth; the UI will just
 render what it returns.
+
+---
+
+made by @BChopLXXXII
