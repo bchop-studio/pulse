@@ -25,7 +25,7 @@ configured and every model it can find, then shows you green (alive), red
 ## Install
 
 ```bash
-git clone https://github.com/BeardedChop/pulse ~/github/pulse
+git clone https://github.com/bchop-studio/pulse ~/github/pulse
 sudo ln -s ~/github/pulse/pulse /usr/local/bin/pulse   # or add the dir to PATH
 ```
 
