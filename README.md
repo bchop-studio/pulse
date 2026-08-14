@@ -1,5 +1,7 @@
 # pulse
 
+![Pulse cover](assets/cover.png)
+
 One tap — see which of your models are actually alive.
 
 You have access to a pile of providers and models. Some are great, some run
