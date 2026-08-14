@@ -102,7 +102,7 @@ If you fork or contribute, never commit your own `.env` or `auth.json`. The
 
 MIT. Do whatever you want with these.
 
-Built by @BChopLXXXII
+Built by [@BChopLXXXII](https://x.com/BChopLXXXII)
 
 Built for BUILDERS who just want their AI to feel less... corporate.
 
