@@ -1,0 +1,19 @@
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# os / editor
+.DS_Store
+Thumbs.db
+*.swp
+
+# secrets — never commit these
+.env
+.env.*
+*.pem
+*.key
+secrets.json
+auth.json

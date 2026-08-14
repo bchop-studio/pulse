@@ -263,7 +263,7 @@ def chat_probe(p: dict, model: str) -> tuple[str, str]:
                    "messages": [{"role": "user", "content": PROBE_TEXT}]}
     status, data, err = _http_json(url, headers, payload, TIMEOUT_CHAT)
     if status == 200 and isinstance(data, dict):
-    # openai shape
+        # openai shape
         ch = data.get("choices")
         if ch:
             msg = ch[0].get("message", {})

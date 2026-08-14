@@ -54,6 +54,24 @@ copilot
 - **red** — the provider refused (no access, or model not found).
 - **yellow** — out of usage / rate-limited, or the provider errored.
 
+## Security & privacy
+
+Pulse reads your local Hermes config to find your providers and keys:
+`~/.hermes/auth.json`, `~/.hermes/config.yaml`, and `~/.hermes/.env`. It also
+falls back to `gh auth token` for GitHub Copilot. This is read-only, on your
+own machine, the same way Hermes itself reads them.
+
+- **Nothing leaves your machine except the health checks.** The only network
+  requests are tiny "reply with: ok" calls sent to each provider's own API,
+  authorized with that provider's key.
+- **Secrets are never printed, logged, or written anywhere.** Keys live only
+  in memory for the lifetime of the run. Output shows provider and model
+  names and a status, never a credential.
+- **No telemetry, no analytics, no third-party calls.**
+
+If you fork or contribute, never commit your own `.env` or `auth.json`. The
+`.gitignore` already blocks them.
+
 ## Notes
 
 - Anthropic's API isn't key-scoped to a model list, so pulse probes a model
