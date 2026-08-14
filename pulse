@@ -7,8 +7,8 @@ provider for its real model list, then sends a tiny "say ok" request to
 every model. Prints green (alive), red (refused / out of usage), or
 yellow (can't tell).
 
-Secrets never print. Keys are read from disk, used in memory, and shown
-only as a fingerprint like "key …a1b2 present".
+Secrets never print. Keys are read from disk, used in memory, and never
+included in the output.
 """
 from __future__ import annotations
 
@@ -96,10 +96,6 @@ def _http_json(url: str, headers: dict, payload: dict | None, timeout: int):
         return e.code, data, f"HTTP {e.code}"
     except Exception as e:
         return 0, None, str(e)
-
-
-def _fp(key: str) -> str:
-    return f"…{key[-4:]}" if key and len(key) >= 4 else "(set)"
 
 
 # ---------------------------------------------------------------- discovery
