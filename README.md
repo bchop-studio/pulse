@@ -38,6 +38,9 @@ pulse                      # check everything
 pulse --provider copilot   # just one provider
 pulse --limit 5            # cap models per provider (default 12)
 pulse --list-only          # list models without probing
+pulse --prices             # all Nous models with current prices
+pulse --prices free        # only free Nous models
+pulse --prices sale        # only discounted Nous models
 pulse --json               # machine-readable output
 pulse --watch              # live board, refresh liveness every 60s
 pulse --watch 20           # live board, refresh every 20s
@@ -45,6 +48,11 @@ pulse --watch 20           # live board, refresh every 20s
 
 Exit code is `0` when at least one model is alive, `1` when none are — so
 you can wire it into scripts.
+
+`--prices` reads the live Nous Portal catalog and shows input and output cost
+in US dollars per one million tokens. Sale rows include the original price, so
+Portal-only discounts are visible without hunting through a web page. Add
+`--json` when another tool needs the same price data.
 
 ## Reading the output
 

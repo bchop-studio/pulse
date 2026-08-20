@@ -257,26 +257,107 @@ def get_usage(p: dict) -> str | None:
     return None
 
 
-def list_models(p: dict) -> tuple[list[str], str]:
-    """Return (model_ids, note). Falls back to a default model if listing fails."""
+def get_model_catalog(p: dict) -> tuple[list[dict], str]:
+    """Return the provider's complete model metadata from its models endpoint."""
     prov, base, key = p["provider"], p["base_url"], p.get("key")
     if not key:
         return [], "no key available (keyring-only, set env var)"
-    if prov in ANTHROPIC_STYLE:
-        # Anthropic has no /models on the key-scoped API; use known IDs.
-        return [], "anthropic: model list not key-scoped, using --model only"
     url = f"{base}/models"
     if prov == "openai-codex":
-        # Codex requires a client_version query param.
         url += "?client_version=1.0.0"
     status, data, err = _http_json(url, _headers(prov, key), None, TIMEOUT_LIST)
-    if status == 200 and isinstance(data, dict):
-        ids = [m.get("id") for m in data.get("data", []) if isinstance(m, dict) and m.get("id")]
-        # Codex returns its list under "models" with "slug" instead of data/id.
-        if not ids and isinstance(data.get("models"), list):
+    if status == 200 and isinstance(data, dict) and isinstance(data.get("data"), list):
+        return [m for m in data["data"] if isinstance(m, dict)], ""
+    if status == 200:
+        return [], "unexpected response shape"
+    return [], err or f"HTTP {status}"
+
+
+def _price_per_million(value) -> float | None:
+    try:
+        return round(float(value) * 1_000_000, 6)
+    except (TypeError, ValueError):
+        return None
+
+
+def normalize_catalog(models: list[dict]) -> list[dict]:
+    """Turn provider price metadata into stable, display-ready rows."""
+    rows = []
+    for model in models:
+        model_id = model.get("id")
+        if not model_id:
+            continue
+        pricing = model.get("pricing") if isinstance(model.get("pricing"), dict) else {}
+        original = pricing.get("original") if isinstance(pricing.get("original"), dict) else {}
+        input_price = _price_per_million(pricing.get("prompt"))
+        output_price = _price_per_million(pricing.get("completion"))
+        original_input = _price_per_million(original.get("prompt"))
+        original_output = _price_per_million(original.get("completion"))
+        free = input_price == 0 and output_price == 0
+        sale = not free and (
+            (input_price is not None and original_input is not None and input_price < original_input)
+            or (output_price is not None and original_output is not None and output_price < original_output)
+        )
+        rows.append({
+            "id": model_id,
+            "name": model.get("name") or model_id,
+            "kind": "free" if free else "sale" if sale else "standard",
+            "input_per_million": input_price,
+            "output_per_million": output_price,
+            "original_input_per_million": original_input,
+            "original_output_per_million": original_output,
+        })
+    return sorted(rows, key=lambda row: (row["kind"] != "free", row["kind"] != "sale", row["id"]))
+
+
+def filter_catalog(rows: list[dict], kind: str) -> list[dict]:
+    return rows if kind == "all" else [row for row in rows if row["kind"] == kind]
+
+
+def _money(value) -> str:
+    if value is None:
+        return "n/a"
+    if value == 0:
+        return "$0.00"
+    return f"${value:.2f}" if value >= 0.01 else f"${value:.4f}"
+
+
+def render_catalog(rows: list[dict], kind: str) -> str:
+    """Render a Nous catalog with current and original token prices."""
+    rows = filter_catalog(rows, kind)
+    heading = f"Nous model pricing ({kind}) — USD per 1M tokens"
+    output = [heading, "", f"{'model':<54} {'input':>11} {'output':>11}  status"]
+    for row in rows:
+        label = row["kind"].upper()
+        detail = label
+        if row["kind"] == "sale":
+            detail += (f"  was {_money(row['original_input_per_million'])} input / "
+                       f"{_money(row['original_output_per_million'])} output")
+        output.append(f"{row['id']:<54} {_money(row['input_per_million']):>11} "
+                      f"{_money(row['output_per_million']):>11}  {detail}")
+    output.append(f"\n{len(rows)} models")
+    return "\n".join(output)
+
+
+def list_models(p: dict) -> tuple[list[str], str]:
+    """Return (model_ids, note). Falls back to a default model if listing fails."""
+    prov = p["provider"]
+    if prov in ANTHROPIC_STYLE:
+        return [], "anthropic: model list not key-scoped, using --model only"
+    models, err = get_model_catalog(p)
+    ids = [m.get("id") for m in models if m.get("id")]
+    # Codex returns its list under "models" with "slug" instead of data/id.
+    if not ids and prov == "openai-codex":
+        base, key = p["base_url"], p.get("key")
+        if not key:
+            return [], "no key available (keyring-only, set env var)"
+        status, data, err = _http_json(
+            f"{base}/models?client_version=1.0.0", _headers(prov, key), None, TIMEOUT_LIST
+        )
+        if status == 200 and isinstance(data, dict) and isinstance(data.get("models"), list):
             ids = [m.get("slug") for m in data["models"] if isinstance(m, dict) and m.get("slug")]
-        if ids:
-            return sorted(set(ids)), ""
+    if ids:
+        return sorted(set(ids)), ""
     if p.get("default_model"):
         return [p["default_model"]], f"list failed ({err}), using default"
     return [], f"list failed ({err or 'no models'})"
@@ -414,6 +495,8 @@ def main():
                     help="max models per provider (0 = all)")
     ap.add_argument("--json", action="store_true", help="machine-readable output")
     ap.add_argument("--list-only", action="store_true", help="list models, don't probe")
+    ap.add_argument("--prices", nargs="?", const="all", choices=("all", "free", "sale"),
+                    metavar="FILTER", help="show Nous model pricing: all, free, or sale")
     ap.add_argument("--watch", type=int, nargs="?", const=60, metavar="SECONDS",
                     help="re-check liveness on a loop (default 60s). Lists + usage "
                          "refresh every 5 minutes. Ctrl+C to stop.")
@@ -425,6 +508,22 @@ def main():
     if not providers:
         print("No providers found. Is Hermes set up? (~/.hermes/auth.json)")
         sys.exit(1)
+
+    if args.prices:
+        nous = next((p for p in providers if p["provider"] == "nous"), None)
+        if not nous:
+            print("Nous Portal is not configured in Hermes.")
+            sys.exit(1)
+        models, error = get_model_catalog(nous)
+        if error:
+            print(f"Could not load Nous model pricing: {error}")
+            sys.exit(1)
+        rows = filter_catalog(normalize_catalog(models), args.prices)
+        if args.json:
+            print(json.dumps(rows, indent=2))
+        else:
+            print(render_catalog(rows, "all" if args.prices == "all" else args.prices))
+        return
 
     usages = {}
 
