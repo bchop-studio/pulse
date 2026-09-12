@@ -80,8 +80,9 @@ model list and usage every 5 minutes, so it stays cheap to run.
 ## Security & privacy
 
 Pulse reads your local Hermes config to find your providers and keys:
-`~/.hermes/auth.json`, `~/.hermes/config.yaml`, and `~/.hermes/.env`. It also
-falls back to `gh auth token` for GitHub Copilot. This is read-only, on your
+`~/.hermes/auth.json`, `~/.hermes/config.yaml`, and `~/.hermes/.env`. GitHub
+Copilot requires a Copilot credential from Hermes or `COPILOT_GITHUB_TOKEN`;
+Pulse never substitutes a general GitHub CLI token. This is read-only, on your
 own machine, the same way Hermes itself reads them.
 
 - **Nothing leaves your machine except the health checks.** The only network
@@ -90,7 +91,13 @@ own machine, the same way Hermes itself reads them.
 - **Secrets are never printed, logged, or written anywhere.** Keys live only
   in memory for the lifetime of the run. Output shows provider and model
   names and a status, never a credential.
-- **No telemetry, no analytics, no third-party calls.**
+- **Remote provider URLs must use HTTPS.** Plain HTTP is allowed only for
+  loopback development endpoints, and credentials never follow a redirect to
+  another host, scheme, or port.
+- **Provider text cannot control your terminal.** Control characters are
+  removed from the human-readable board and pricing output.
+- **No telemetry or analytics.** Pulse calls only the provider APIs needed for
+  model lists, pricing, usage, and health checks.
 
 If you fork or contribute, never commit your own `.env` or `auth.json`. The
 `.gitignore` already blocks them.
@@ -101,8 +108,8 @@ If you fork or contribute, never commit your own `.env` or `auth.json`. The
   you name: `pulse --provider anthropic --model claude-sonnet-4-5`.
 - OpenRouter lists hundreds of models; pulse caps at 12 per provider unless
   you pass `--limit 0` for all of them.
-- GitHub Copilot needs a token. Pulse tries `~/.hermes/.env`, then `gh auth
-  token` from the GitHub CLI.
+- GitHub Copilot needs a dedicated Copilot token from Hermes or
+  `COPILOT_GITHUB_TOKEN`. A normal `gh auth token` is not a Copilot credential.
 - Only OpenRouter exposes a credit balance over the plain API, so it's the one
   with a number on the usage line. Other providers don't share quota this way,
   so pulse shows nothing rather than guess. As more providers open up a quota
