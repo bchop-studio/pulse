@@ -27,3 +27,14 @@ cd pulse
 ```
 
 No build step. Edit `pulse`, run it, done.
+
+Run the full local check before opening a pull request:
+
+```bash
+python3 -W error::ResourceWarning -m unittest -v
+python3 -m py_compile pulse test_pulse.py
+```
+
+Network changes must keep remote provider URLs on HTTPS, prevent credentials
+from crossing redirect origins, and sanitize provider-controlled terminal
+text. Use fake credentials and local test servers for regressions.

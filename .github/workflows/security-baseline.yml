@@ -1,0 +1,72 @@
+name: Security baseline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "19 9 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-baseline-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.12"
+
+      - name: Run tests
+        run: python -W error::ResourceWarning -m unittest -v
+
+      - name: Compile Python
+        run: python -m py_compile pulse test_pulse.py
+
+      - name: Smoke-test the CLI
+        env:
+          HERMES_HOME: ${{ runner.temp }}/pulse-empty-home
+        run: ./pulse --help
+
+      - name: Check documented shell commands
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re
+          import subprocess
+
+          for path in (Path("README.md"), Path("CONTRIBUTING.md")):
+              blocks = re.findall(r"```bash\n(.*?)```", path.read_text(), re.DOTALL)
+              for index, block in enumerate(blocks, start=1):
+                  subprocess.run(
+                      ["bash", "-n"],
+                      input=block,
+                      text=True,
+                      check=True,
+                  )
+              print(f"{path}: {len(blocks)} Bash blocks passed syntax checks")
+          PY
+
+      - name: Reject sensitive tracked filenames
+        run: |
+          python - <<'PY'
+          import subprocess
+
+          blocked_suffixes = (".env", ".pem", ".key", "id_rsa", "id_ed25519", "auth.json")
+          tracked = subprocess.check_output(["git", "ls-files"], text=True).splitlines()
+          blocked = [path for path in tracked if path.lower().endswith(blocked_suffixes)]
+          if blocked:
+              raise SystemExit("Sensitive tracked filenames: " + ", ".join(blocked))
+          print("sensitive tracked filename check passed")
+          PY

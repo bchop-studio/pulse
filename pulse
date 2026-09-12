@@ -14,10 +14,13 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures as cf
+import ipaddress
 import json
 import os
 import sys
+import unicodedata
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -81,12 +84,47 @@ def _headers(provider: str, key: str) -> dict:
     return h
 
 
+def _origin(url: str) -> tuple[str, str, int | None]:
+    parsed = urllib.parse.urlsplit(url)
+    port = parsed.port
+    if port is None:
+        port = 443 if parsed.scheme.lower() == "https" else 80
+    return parsed.scheme.lower(), (parsed.hostname or "").lower(), port
+
+
+def _transport_is_safe(url: str) -> bool:
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.scheme.lower() == "https":
+        return True
+    if parsed.scheme.lower() != "http":
+        return False
+    hostname = (parsed.hostname or "").lower()
+    if hostname == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(hostname).is_loopback
+    except ValueError:
+        return False
+
+
+class _SameOriginRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if _origin(req.full_url) != _origin(newurl):
+            raise urllib.error.HTTPError(
+                req.full_url, code, "redirect blocked: destination origin changed", headers, fp
+            )
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
 def _http_json(url: str, headers: dict, payload: dict | None, timeout: int):
     """Return (status, data_dict_or_None, error_str)."""
+    if not _transport_is_safe(url):
+        return 0, None, "refusing to send credentials over a non-HTTPS URL"
     body = None if payload is None else json.dumps(payload).encode()
     req = urllib.request.Request(url, data=body, headers=headers, method="POST" if payload else "GET")
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
+        opener = urllib.request.build_opener(_SameOriginRedirectHandler())
+        with opener.open(req, timeout=timeout) as r:
             return r.status, json.loads(r.read().decode() or "{}"), ""
     except urllib.error.HTTPError as e:
         try:
@@ -137,7 +175,7 @@ def load_custom_providers() -> dict:
 # env-var fallbacks for providers not present in the auth pool
 ENV_PROVIDERS = {
     "anthropic":  ("https://api.anthropic.com", ["ANTHROPIC_API_KEY", "ANTHROPIC_TOKEN"]),
-    "copilot":    ("https://api.githubcopilot.com", ["COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"]),
+    "copilot":    ("https://api.githubcopilot.com", ["COPILOT_GITHUB_TOKEN"]),
     "openrouter": ("https://openrouter.ai/api/v1", ["OPENROUTER_API_KEY"]),
     "kimi":       ("https://api.moonshot.ai/v1", ["KIMI_API_KEY"]),
     "kimi-coding":("https://api.moonshot.ai/v1", ["KIMI_API_KEY", "KIMI_CODING_API_KEY"]),
@@ -152,16 +190,6 @@ ENV_PROVIDERS = {
 DEFAULT_MODEL_CAP = 12
 
 
-def _gh_token() -> str:
-    """Copilot token via `gh auth token` as a last resort (device-code tokens)."""
-    try:
-        import subprocess
-        r = subprocess.run(["gh", "auth", "token"], capture_output=True, text=True, timeout=10)
-        return r.stdout.strip() if r.returncode == 0 else ""
-    except Exception:
-        return ""
-
-
 def discover() -> list[dict]:
     """Return list of {provider, base_url, key, source}."""
     found = []
@@ -172,9 +200,12 @@ def discover() -> list[dict]:
         if not entries:
             continue
         e = entries[0]
-        base = e.get("base_url") or e.get("inference_base_url") or ""
-        # OAuth access_token entries; api_key entries store secret separately
-        key = e.get("access_token") or ""
+        if slug == "nous":
+            base = e.get("inference_base_url") or e.get("base_url") or ""
+            key = e.get("agent_key") or e.get("access_token") or ""
+        else:
+            base = e.get("base_url") or e.get("inference_base_url") or ""
+            key = e.get("access_token") or ""
         auth_type = e.get("auth_type", "")
         if auth_type == "oauth" and not key:
             key = e.get("access_token", "")
@@ -211,7 +242,7 @@ def discover() -> list[dict]:
                           "default_model": cfg.get("default_model", "")})
             seen.add(slug)
 
-    # fill in needs_env entries from env fallbacks (and gh CLI for copilot)
+    # fill in needs_env entries from dedicated provider env vars
     for f in found:
         if f.get("needs_env"):
             slug = f["provider"]
@@ -221,11 +252,6 @@ def discover() -> list[dict]:
                     f["key"] = k
                     f["source"] += f"+env:{var}"
                     break
-            if not f.get("key") and slug == "copilot":
-                k = _gh_token()
-                if k:
-                    f["key"] = k
-                    f["source"] += "+gh-cli"
     return found
 
 
@@ -333,7 +359,8 @@ def render_catalog(rows: list[dict], kind: str) -> str:
         if row["kind"] == "sale":
             detail += (f"  was {_money(row['original_input_per_million'])} input / "
                        f"{_money(row['original_output_per_million'])} output")
-        output.append(f"{row['id']:<54} {_money(row['input_per_million']):>11} "
+        model_id = _safe_text(row["id"])
+        output.append(f"{model_id:<54} {_money(row['input_per_million']):>11} "
                       f"{_money(row['output_per_million']):>11}  {detail}")
     output.append(f"\n{len(rows)} models")
     return "\n".join(output)
@@ -378,11 +405,6 @@ def chat_probe(p: dict, model: str) -> tuple[str, str]:
         payload = {"model": model, "max_tokens": 32,
                    "messages": [{"role": "user", "content": PROBE_TEXT}]}
     status, data, err = _http_json(url, headers, payload, TIMEOUT_CHAT)
-    if prov == "openai-codex" and status in (0, 400, 404, 422):
-        # Codex's backend rejects /chat/completions for these slugs, but the 200
-        # on the model list above already proved the key + model are reachable.
-        # Count that as alive so the board reflects access, not probe-shape luck.
-        return "alive", "ok (listed; chat shape n/a)"
     if status == 200 and isinstance(data, dict):
         # openai shape
         ch = data.get("choices")
@@ -423,6 +445,10 @@ def chat_probe(p: dict, model: str) -> tuple[str, str]:
 
 G, R, Y, D, X = "\033[32m", "\033[31m", "\033[33m", "\033[2m", "\033[0m"
 ICON = {"alive": f"{G}●{X}", "refused": f"{R}●{X}", "limited": f"{Y}●{X}", "error": f"{Y}●{X}"}
+
+
+def _safe_text(value) -> str:
+    return "".join(ch for ch in str(value) if not unicodedata.category(ch).startswith("C"))
 
 
 def run_scan(providers, args, usages, refresh_lists=True):
@@ -470,15 +496,15 @@ def render(results, usages):
     for prov in byprov:
         rows = sorted(byprov[prov], key=lambda r: (order.get(r["state"], 9), r["model"] or ""))
         usage = usages.get(prov)
-        usage_str = f"  {D}usage: {usage}{X}" if usage else ""
-        out.append(f"\n{prov}{usage_str}")
+        usage_str = f"  {D}usage: {_safe_text(usage)}{X}" if usage else ""
+        out.append(f"\n{_safe_text(prov)}{usage_str}")
         for r in rows:
             total += 1
             if r["state"] == "alive":
                 total_alive += 1
             icon = ICON.get(r["state"], f"{D}●{X}")
-            model = r["model"] or "(none)"
-            detail = f"  {D}{r['detail']}{X}" if r["detail"] and r["state"] != "alive" else ""
+            model = _safe_text(r["model"] or "(none)")
+            detail = f"  {D}{_safe_text(r['detail'])}{X}" if r["detail"] and r["state"] != "alive" else ""
             out.append(f"  {icon} {model}{detail}")
     out.append(f"\n{total_alive}/{total} models alive")
     return "\n".join(out), total_alive
